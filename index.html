@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Baias do Confinamento</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  html,body{margin:0;height:100%;font:14px system-ui,sans-serif}
+  #map{position:absolute;top:0;bottom:0;left:0;right:300px;cursor:crosshair}
+  #side{position:absolute;top:0;bottom:0;right:0;width:300px;box-sizing:border-box;padding:12px;overflow:auto;background:#fafafa;border-left:1px solid #ccc}
+  #side input[type=text]{width:100%;box-sizing:border-box;padding:6px}
+  button{margin:2px 0;padding:5px 8px;cursor:pointer}
+  .row{display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid #eee}
+  .row span{cursor:pointer}
+  .lbl{background:rgba(0,0,0,.6);color:#fff;border:0;box-shadow:none;font-weight:600}
+  .lbl::before{display:none}
+  small{color:#555}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="side">
+  <b>Fazenda</b>
+  <input type="text" id="q" placeholder="lat, long  ex: -20.3813, -49.2230">
+  <button id="go">Ir</button>
+  <label><button onclick="kml.click()">Importar KML/KMZ</button><input type="file" id="kml" accept=".kml,.kmz" hidden></label>  <p><small>
+    Clique nos cantos da baia. Para fechar: clique no 1º ponto ou Enter.<br>
+    Cliques perto de um canto existente grudam nele (cercas compartilhadas).<br>
+    Backspace desfaz ponto · Esc cancela.
+  </small></p>
+  <button id="close">Fechar baia</button>
+  <button id="undo">Desfazer ponto</button>
+  <button id="cancel">Cancelar</button>
+  <h4 id="count">Baias (0)</h4>
+  <div id="list"></div>
+  <p>
+    <button id="exp">Exportar GeoJSON</button>
+    <label><button onclick="imp.click()">Importar GeoJSON</button><input type="file" id="imp" accept=".json,.geojson" hidden></label>
+    <button id="clear">Limpar tudo</button>
+  </p>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script>
+const KEY = 'baias-v1', SNAP_PX = 12;
+let baias = [], cur = [];
+try { baias = JSON.parse(localStorage.getItem(KEY)) || []; } catch {}
+
+// ponytail: centro padrão = fazenda do trato_section_map; troque pela busca
+const map = L.map('map', {maxZoom: 21, doubleClickZoom: false}).setView([-20.3813, -49.2230], 17);
+// ponytail: tiles do Google sem chave (uso não oficial); p/ produção usar Map Tiles API com API key
+const g = lyrs => L.tileLayer(`https://mt{s}.google.com/vt/lyrs=${lyrs}&x={x}&y={y}&z={z}`,
+  {maxZoom: 21, maxNativeZoom: 20, subdomains: '0123', attribution: 'Google'});
+const bases = {
+  'Google Satélite': g('s').addTo(map),
+  'Google Híbrido': g('y'),
+  'Esri Satélite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {maxZoom: 21, maxNativeZoom: 19, attribution: 'Esri World Imagery'}),
+};
+L.control.layers(bases, null, {position: 'topleft'}).addTo(map);
+const layer = L.layerGroup().addTo(map);
+const rubber = L.polyline([], {color: '#0ff', weight: 1, dashArray: '4', interactive: false}).addTo(map);
+
+// área em m², projeção local plana (ok para baias; erro desprezível em poucas centenas de metros)
+function area(pts) {
+  const k = Math.cos(pts[0][0] * Math.PI / 180) * 111320, m = 110540;
+  let s = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const [a, b] = [pts[i], pts[(i + 1) % pts.length]];
+    s += a[1] * k * b[0] * m - b[1] * k * a[0] * m;
+  }
+  return Math.abs(s / 2);
+}
+
+function snap(ll) {
+  const p = map.latLngToContainerPoint(ll);
+  for (const v of [...baias.flatMap(b => b.pts), ...cur])
+    if (map.latLngToContainerPoint(v).distanceTo(p) < SNAP_PX) return v;
+  return [ll.lat, ll.lng];
+}
+
+function save() { try { localStorage.setItem(KEY, JSON.stringify(baias)); } catch {} }
+
+function draw() {
+  layer.clearLayers();
+  for (const b of baias) {
+    L.polygon(b.pts, {color: '#ff0', weight: 2, fillOpacity: .15, interactive: false})
+      .bindTooltip(b.name, {permanent: true, direction: 'center', className: 'lbl'}).addTo(layer);
+    b.pts.forEach(v => L.circleMarker(v, {radius: 3, color: '#ff0', interactive: false}).addTo(layer));
+  }
+  if (cur.length) {
+    L.polyline(cur, {color: '#0ff', weight: 2, interactive: false}).addTo(layer);
+    cur.forEach((v, i) => L.circleMarker(v, {radius: i ? 4 : 7, color: '#0ff', interactive: false}).addTo(layer));
+  }
+  document.getElementById('count').textContent = `Baias (${baias.length})`;
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+  baias.forEach((b, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<span title="renomear">${b.name} <small>${Math.round(area(b.pts))} m²</small></span><button title="apagar">✕</button>`;
+    row.querySelector('span').onclick = () => { const n = prompt('Nome', b.name); if (n) { b.name = n; save(); draw(); } };
+    row.querySelector('span').ondblclick = () => map.fitBounds(b.pts);
+    row.querySelector('button').onclick = () => { if (confirm(`Apagar ${b.name}?`)) { baias.splice(i, 1); save(); draw(); } };
+    list.appendChild(row);
+  });
+}
+
+function closeBaia() {
+  if (cur.length < 3) return alert('Precisa de pelo menos 3 cantos.');
+  const name = prompt('Nome da baia', 'Baia ' + (baias.length + 1));
+  if (name === null) return;
+  baias.push({name, pts: cur});
+  cur = [];
+  rubber.setLatLngs([]);
+  save(); draw();
+}
+const undo = () => { cur.pop(); rubber.setLatLngs([]); draw(); };
+const cancel = () => { cur = []; rubber.setLatLngs([]); draw(); };
+
+map.on('click', e => {
+  const p = snap(e.latlng);
+  if (cur.length >= 3 && p === cur[0]) return closeBaia();
+  if (cur.includes(p)) return;
+  cur.push(p); draw();
+});
+map.on('mousemove', e => { if (cur.length) rubber.setLatLngs([cur[cur.length - 1], e.latlng]); });
+document.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT') return;
+  if (e.key === 'Enter') closeBaia();
+  else if (e.key === 'Backspace') { e.preventDefault(); undo(); }
+  else if (e.key === 'Escape') cancel();
+});
+document.getElementById('close').onclick = closeBaia;
+document.getElementById('undo').onclick = undo;
+document.getElementById('cancel').onclick = cancel;
+document.getElementById('clear').onclick = () => { if (confirm('Apagar todas as baias?')) { baias = []; cur = []; save(); draw(); } };
+
+function go() {
+  const m = document.getElementById('q').value.trim().replace(/°/g, '')
+    .match(/^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/);
+  if (!m || Math.abs(m[1]) > 90 || Math.abs(m[2]) > 180) return alert('Use lat, long em graus decimais. Ex: -20.3813, -49.2230');
+  map.setView([+m[1], +m[2]], 18);
+}
+
+// contorno da propriedade (KML/KMZ): só referência visual, fica salvo no navegador
+const FKEY = 'fazenda-v1';
+const fazenda = L.layerGroup().addTo(map);
+function showFazenda(shapes) {
+  fazenda.clearLayers();
+  for (const s of shapes)
+    (s.length === 1 ? L.circleMarker(s[0], {radius: 6, color: '#f33'}) : L.polyline(s, {color: '#f33', weight: 3, interactive: false})).addTo(fazenda);
+  const all = shapes.flat();
+  if (all.length) map.fitBounds(all, {maxZoom: 18});
+}
+document.getElementById('kml').onchange = async e => {
+  try {
+    const f = e.target.files[0];
+    let text;
+    if (/\.kmz$/i.test(f.name)) {
+      const zip = await JSZip.loadAsync(f);
+      const kmlFile = Object.values(zip.files).find(z => /\.kml$/i.test(z.name));
+      if (!kmlFile) throw Error('KMZ sem .kml dentro');
+      text = await kmlFile.async('string');
+    } else text = await f.text();
+    // ponytail: pega todo <coordinates> (Polygon, LineString, Point); ignora estilos/pastas
+    const shapes = [...new DOMParser().parseFromString(text, 'text/xml').getElementsByTagName('coordinates')]
+      .map(c => c.textContent.trim().split(/\s+/).map(t => t.split(',').map(Number)).filter(p => p.length >= 2 && !p.some(isNaN)).map(([ln, la]) => [la, ln]))
+      .filter(s => s.length);
+    if (!shapes.length) throw Error('nenhuma coordenada encontrada');
+    try { localStorage.setItem(FKEY, JSON.stringify(shapes)); } catch {}
+    showFazenda(shapes);
+  } catch (err) { alert('Não consegui ler o arquivo: ' + err.message); }
+  e.target.value = '';
+};
+try { const s = JSON.parse(localStorage.getItem(FKEY)); if (s) showFazenda(s); } catch {}
+document.getElementById('go').onclick = go;
+document.getElementById('q').onkeydown = e => { if (e.key === 'Enter') go(); };
+
+document.getElementById('exp').onclick = () => {
+  const fc = {type: 'FeatureCollection', features: baias.map(b => ({
+    type: 'Feature',
+    properties: {name: b.name, area_m2: Math.round(area(b.pts))},
+    geometry: {type: 'Polygon', coordinates: [[...b.pts, b.pts[0]].map(([la, ln]) => [ln, la])]}
+  }))};
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([JSON.stringify(fc, null, 1)], {type: 'application/geo+json'}));
+  a.download = 'baias.geojson';
+  a.click();
+};
+document.getElementById('imp').onchange = async e => {
+  try {
+    const fc = JSON.parse(await e.target.files[0].text());
+    for (const f of fc.features || [])
+      if (f.geometry?.type === 'Polygon')
+        baias.push({name: f.properties?.name || 'Baia ' + (baias.length + 1),
+                    pts: f.geometry.coordinates[0].slice(0, -1).map(([ln, la]) => [la, ln])});
+    save(); draw();
+    if (baias.length) map.fitBounds(baias.flatMap(b => b.pts));
+  } catch (err) { alert('GeoJSON inválido: ' + err.message); }
+  e.target.value = '';
+};
+
+draw();
+if (baias.length) map.fitBounds(baias.flatMap(b => b.pts));
+</script>
+</body>
+</html>
