@@ -24,7 +24,16 @@
   <b>Fazenda</b>
   <input type="text" id="q" placeholder="lat, long  ex: -20.3813, -49.2230">
   <button id="go">Ir</button>
-  <label><button onclick="kml.click()">Importar KML/KMZ</button><input type="file" id="kml" accept=".kml,.kmz" hidden></label>  <p><small>
+  <label><button onclick="kml.click()">Importar KML/KMZ</button><input type="file" id="kml" accept=".kml,.kmz" hidden></label>
+  <p><b>Imagem mais atual</b><br><small>
+    Tire um print do Apple Maps (satélite, norte para cima) da área e importe.
+    Arraste os 2 pinos laranja até a imagem encaixar no mapa de fundo.</small><br>
+    <label><button onclick="img.click()">Importar print</button><input type="file" id="img" accept="image/*" hidden></label>
+    <button id="imgdel">Remover</button><br>
+    <label for="op"><small>Transparência</small></label>
+    <input type="range" id="op" min="0" max="1" step="0.05" value="1">
+  </p>
+  <p><small>
     Clique nos cantos da baia. Para fechar: clique no 1º ponto ou Enter.<br>
     Cliques perto de um canto existente grudam nele (cercas compartilhadas).<br>
     Backspace desfaz ponto · Esc cancela.
@@ -57,8 +66,58 @@ const bases = {
   'Google Híbrido': g('y'),
   'Esri Satélite': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     {maxZoom: 21, maxNativeZoom: 19, attribution: 'Esri World Imagery'}),
+  // ponytail: Bing sem chave (uso não oficial), data de imagem diferente do Google
+  'Bing Satélite': new (L.TileLayer.extend({getTileUrl(c) {
+    let q = '';
+    for (let i = c.z; i > 0; i--) q += ((c.x >> (i - 1)) & 1) + (((c.y >> (i - 1)) & 1) << 1);
+    return `https://ecn.t${(c.x + c.y) % 4}.tiles.virtualearth.net/tiles/a${q}.jpeg?g=14000`;
+  }}))('', {maxZoom: 21, maxNativeZoom: 19, attribution: 'Microsoft Bing'}),
 };
 L.control.layers(bases, null, {position: 'topleft'}).addTo(map);
+
+// print do Apple Maps como camada: 2 pinos arrastáveis (canto sup. esq. e inf. dir.)
+// ponytail: encaixe só por translação+escala (print norte p/ cima); rotação se precisar
+const IKEY = 'foto-v1';
+map.createPane('foto').style.zIndex = 250;
+let foto = null;
+const pin = () => L.marker([0, 0], {draggable: true, icon: L.divIcon({className: '', html:
+  '<div style="width:14px;height:14px;margin:-7px;border-radius:50%;background:#f80;border:2px solid #fff"></div>'})});
+const pNW = pin(), pSE = pin();
+function saveFoto() { const {ov, ...st} = foto; try { localStorage.setItem(IKEY, JSON.stringify(st)); } catch { alert('Imagem grande demais para salvar no navegador; vai sumir ao recarregar.'); } }
+function showFoto() {
+  if (foto.ov) map.removeLayer(foto.ov);
+  foto.ov = L.imageOverlay(foto.url, [foto.nw, foto.se], {pane: 'foto', opacity: foto.op}).addTo(map);
+  pNW.setLatLng(foto.nw).addTo(map); pSE.setLatLng(foto.se).addTo(map);
+  document.getElementById('op').value = foto.op;
+}
+for (const [p, k] of [[pNW, 'nw'], [pSE, 'se']]) {
+  p.on('drag', () => { const l = p.getLatLng(); foto[k] = [l.lat, l.lng]; foto.ov.setBounds([foto.nw, foto.se]); });
+  p.on('dragend', saveFoto);
+}
+document.getElementById('op').oninput = e => { if (foto) { foto.op = +e.target.value; foto.ov.setOpacity(foto.op); saveFoto(); } };
+document.getElementById('imgdel').onclick = () => {
+  if (!foto) return;
+  map.removeLayer(foto.ov); pNW.remove(); pSE.remove(); foto = null;
+  try { localStorage.removeItem(IKEY); } catch {}
+};
+document.getElementById('img').onchange = async e => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (!f) return;
+  const im = await createImageBitmap(f);
+  // reduz p/ JPEG (cabe no localStorage)
+  const s = Math.min(1, 2400 / Math.max(im.width, im.height)), cv = document.createElement('canvas');
+  cv.width = im.width * s; cv.height = im.height * s;
+  cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
+  // posição inicial: centralizada, 80% da altura da tela, mantendo proporção
+  const sz = map.getSize(), h = sz.y * .8, w = h * im.width / im.height;
+  const nw = map.containerPointToLatLng([sz.x / 2 - w / 2, sz.y * .1]), se = map.containerPointToLatLng([sz.x / 2 + w / 2, sz.y * .9]);
+  if (foto) map.removeLayer(foto.ov);
+  foto = {url: cv.toDataURL('image/jpeg', .85), nw: [nw.lat, nw.lng], se: [se.lat, se.lng], op: .6};
+  showFoto();
+  saveFoto();
+};
+try { const s = JSON.parse(localStorage.getItem(IKEY)); if (s) { foto = s; showFoto(); } } catch {}
 const layer = L.layerGroup().addTo(map);
 const rubber = L.polyline([], {color: '#0ff', weight: 1, dashArray: '4', interactive: false}).addTo(map);
 
