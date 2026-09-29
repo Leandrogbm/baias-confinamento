@@ -22,7 +22,7 @@
 <div id="map"></div>
 <div id="side">
   <b>Fazenda</b>
-  <input type="text" id="q" placeholder="lat, long  ex: -20.3813, -49.2230">
+  <input type="text" id="q" placeholder="lat, long  ou link do Apple Maps">
   <button id="go">Ir</button>
   <label><button onclick="kml.click()">Importar KML/KMZ</button><input type="file" id="kml" accept=".kml,.kmz" hidden></label>
   <p><b>Imagem mais atual</b><br><small>
@@ -98,7 +98,7 @@ document.getElementById('op').oninput = e => { if (foto) { foto.op = +e.target.v
 document.getElementById('imgdel').onclick = () => {
   if (!foto) return;
   map.removeLayer(foto.ov); pNW.remove(); pSE.remove(); foto = null;
-  try { localStorage.removeItem(IKEY); } catch {}
+  try { localStorage.setItem(IKEY, 'off'); } catch {}
 };
 document.getElementById('img').onchange = async e => {
   const f = e.target.files[0];
@@ -113,11 +113,19 @@ document.getElementById('img').onchange = async e => {
   const sz = map.getSize(), h = sz.y * .8, w = h * im.width / im.height;
   const nw = map.containerPointToLatLng([sz.x / 2 - w / 2, sz.y * .1]), se = map.containerPointToLatLng([sz.x / 2 + w / 2, sz.y * .9]);
   if (foto) map.removeLayer(foto.ov);
-  foto = {url: cv.toDataURL('image/jpeg', .85), nw: [nw.lat, nw.lng], se: [se.lat, se.lng], op: .6};
+  foto = {url: cv.toDataURL('image/jpeg', .85), nw: appleBox ? appleBox[0] : [nw.lat, nw.lng], se: appleBox ? appleBox[1] : [se.lat, se.lng], op: .6};
+  if (appleBox) map.fitBounds(appleBox);
   showFoto();
   saveFoto();
 };
-try { const s = JSON.parse(localStorage.getItem(IKEY)); if (s) { foto = s; showFoto(); } } catch {}
+// imagem inicial: satélite Apple da fazenda (apple_fazenda.jpg); "Remover" grava 'off' e ela não volta
+// ponytail: limites estimados pelo print (centro do link + escala); ajuste fino pelos 2 pinos
+let rawFoto = null;
+try { rawFoto = localStorage.getItem(IKEY); } catch {}
+if (rawFoto === null) {
+  foto = {url: 'apple_fazenda.jpg', nw: [-21.306560, -49.327000], se: [-21.313118, -49.317470], op: .8};
+  showFoto(); map.fitBounds([foto.nw, foto.se]);
+} else try { const s = JSON.parse(rawFoto); if (s) { foto = s; showFoto(); } } catch {}
 const layer = L.layerGroup().addTo(map);
 const rubber = L.polyline([], {color: '#0ff', weight: 1, dashArray: '4', interactive: false}).addTo(map);
 
@@ -196,8 +204,17 @@ document.getElementById('undo').onclick = undo;
 document.getElementById('cancel').onclick = cancel;
 document.getElementById('clear').onclick = () => { if (confirm('Apagar todas as baias?')) { baias = []; cur = []; save(); draw(); } };
 
+// link do Apple Maps (maps.apple.com/frame?center=..&span=..) dá o enquadramento exato do print
+let appleBox = null;
 function go() {
-  const m = document.getElementById('q').value.trim().replace(/°/g, '')
+  const raw = document.getElementById('q').value.trim();
+  if (/^https?:/.test(raw)) {
+    const u = new URL(raw), c = (u.searchParams.get('center') || '').split(',').map(Number), s = (u.searchParams.get('span') || '').split(',').map(Number);
+    if (c.length !== 2 || s.length !== 2 || [...c, ...s].some(isNaN)) return alert('Link sem center/span. Use o link de compartilhar/incorporar do Apple Maps.');
+    appleBox = [[c[0] + s[0] / 2, c[1] - s[1] / 2], [c[0] - s[0] / 2, c[1] + s[1] / 2]];
+    return map.fitBounds(appleBox);
+  }
+  const m =document.getElementById('q').value.trim().replace(/°/g, '')
     .match(/^(-?\d+(?:\.\d+)?)\s*[,; ]\s*(-?\d+(?:\.\d+)?)$/);
   if (!m || Math.abs(m[1]) > 90 || Math.abs(m[2]) > 180) return alert('Use lat, long em graus decimais. Ex: -20.3813, -49.2230');
   map.setView([+m[1], +m[2]], 18);
